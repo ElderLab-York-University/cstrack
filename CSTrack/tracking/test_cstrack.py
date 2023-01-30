@@ -189,7 +189,7 @@ if __name__ == '__main__':
     parser.add_argument('--verbose', action='store_true', help='report mAP by class')
 
     parser.add_argument('--data_cfg', type=str,default='../src/lib/cfg/data.json',help='load data from cfg')
-    parser.add_argument('--data_dir', type=str, default='/data/lc/JDE_data')
+    parser.add_argument('--data_dir', type=str, default='../dataset')
     parser.add_argument('--device', default='0',help='-1 for CPU, use comma for multiple gpus')
 
     opt = parser.parse_args()
