@@ -8,6 +8,7 @@ import logging
 import argparse
 import motmetrics as mm
 import numpy as np
+import random
 import torch
 
 from tracker.cstrack import JDETracker
@@ -48,6 +49,19 @@ def write_results(filename, results, data_type):
     return num,len(id)
 
 
+def plot_tracking(img, bounding_boxes, track_ids, id_color):
+    for (id, bounding_box) in zip(track_ids, bounding_boxes):
+        (x, y, w, h) = (int(value) for value in bounding_box)
+
+        if id not in id_color:
+            id_color[id] = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+
+        cv2.rectangle(img, (x, y), (x+w, y+h), id_color[id], 4)
+        cv2.putText(img, str(id), (x, y+25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+
+    return img
+
+
 def eval_seq(opt, dataloader, data_type, result_filename,seq,save_dir=None, show_image=True, frame_rate=30):
     if save_dir:
         mkdir_if_missing(save_dir)
@@ -58,6 +72,7 @@ def eval_seq(opt, dataloader, data_type, result_filename,seq,save_dir=None, show
     seq_num = 0
     once = 1
     vertical_list = {}
+    id_color = {}
     for path, img, img0,frame_id_start in dataloader:
         if once == 1:
             frame_id = frame_id_start
@@ -85,13 +100,12 @@ def eval_seq(opt, dataloader, data_type, result_filename,seq,save_dir=None, show
         timer.toc()
         # save results
         results.append((frame_id + 1, online_tlwhs, online_ids))
-        #if show_image or save_dir is not None:
-        #    online_im = vis.plot_tracking(img0, online_tlwhs, online_ids, frame_id=frame_id,
-        #                                  fps=1. / timer.average_time)
+        if show_image or save_dir is not None:
+           online_im = plot_tracking(img0, online_tlwhs, online_ids, id_color)
         if show_image:
             cv2.imshow('online_im', online_im)
-        #if save_dir is not None:
-        #    cv2.imwrite(os.path.join(save_dir, '{:05d}.jpg'.format(frame_id)), online_im)
+        if save_dir is not None:
+           cv2.imwrite(os.path.join(save_dir, '{:05d}.jpg'.format(frame_id)), online_im)
         frame_id += 1
     # save results
     result_detection,id_num = write_results(result_filename, results, data_type)
@@ -295,4 +309,4 @@ if __name__ == '__main__':
          exp_name='MOT15_val_all_dla34',
          show_image=False,
          save_images=False,
-         save_videos=False)
+         save_videos=True)
