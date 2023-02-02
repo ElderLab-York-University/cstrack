@@ -1,0 +1,12 @@
+# GNU screen settings.
+#
+# Author: Helio Perroni Filho
+
+# Skip the startup message.
+startup_message off
+
+# Attach new windows to the docker container.
+bind c screen docker exec -it $DOCKER_CONTAINER_NAME /bin/bash
+
+# Reduce wait time for screen messages.
+msgwait 1

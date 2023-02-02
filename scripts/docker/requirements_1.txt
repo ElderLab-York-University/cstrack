@@ -1,0 +1,4 @@
+# cython-bbox dependencies.
+
+Cython==0.29.21
+numpy==1.19.1
