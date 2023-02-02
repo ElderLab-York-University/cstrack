@@ -30,6 +30,6 @@ WORKDIR /home/user
 CMD ["/bin/bash"]
 
 # Setup the ordinary user environment.
-ADD build_user.sh requirements.txt ./
+ADD build_user.sh requirements_1.txt requirements_2.txt ./
 RUN /bin/bash -e -x build_user.sh \
-  && rm -f build_user.sh requirements.txt
+  && rm -f build_user.sh requirements_1.txt requirements_2.txt

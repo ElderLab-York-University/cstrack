@@ -6,13 +6,13 @@ CSTrack proposes a strong ReID based one-shot MOT framework. It includes a novel
 
 ## Testing
 
-Download the [pre-trained model](https://yuoffice.sharepoint.com/:u:/s/LE-SENTRYnet/ERMGgpNYk6FPgeEBu_QScP8BWn8YIkby_WSuIJQSVmy1Yw?e=kn1G71) and save it to `CSTrack/weights`.
+Download the [pre-trained model](https://yuoffice.sharepoint.com/:u:/s/LE-SENTRYnet/ERMGgpNYk6FPgeEBu_QScP8BWn8YIkby_WSuIJQSVmy1Yw?e=kn1G71) and save it to `cfg/`.
 
-Download the [MOT-16](https://motchallenge.net/data/MOT16/) dataset and save it to `CSTrack/dataset`.
+Download the [MOT-16](https://motchallenge.net/data/MOT16/) dataset archive and extract it to `data/MOT16/`.
 
-Open a prompt to `CSTrack/tracking` and enter the command below:
+Open a prompt to the repository root and enter the command below:
 
-    python test_cstrack.py --test_mot16 True
+    python scripts/test_cstrack.py
 
 ## See Also
 

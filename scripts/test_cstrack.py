@@ -116,7 +116,7 @@ def eval_seq(opt, dataloader, data_type, result_filename,seq,save_dir=None, show
 def main(opt, data_root='/data/MOT16/train', det_root=None, seqs=('MOT16-05',), exp_name='demo',
          save_images=False, save_videos=False, show_image=True):
     logger.setLevel(logging.INFO)
-    result_root = os.path.join('..', 'results', exp_name)
+    result_root = os.path.join('data/results', exp_name)
     mkdir_if_missing(result_root)
     data_type = 'mot'
 
@@ -127,7 +127,7 @@ def main(opt, data_root='/data/MOT16/train', det_root=None, seqs=('MOT16-05',), 
     result_detection = []
     result_id = []
     for seq in seqs:
-        output_dir = os.path.join('../vis')
+        output_dir = os.path.join('data/vis')
         logger.info('start seq: {}'.format(seq))
         dataloader = LoadImages_jde(osp.join(data_root, seq, 'img1'), opt.img_size,opt.val_hf)
         result_filename = os.path.join(result_root, '{}.txt'.format(seq))
@@ -173,7 +173,7 @@ def main(opt, data_root='/data/MOT16/train', det_root=None, seqs=('MOT16-05',), 
 if __name__ == '__main__':
     #opt = opts().init()
     parser = argparse.ArgumentParser()
-    parser.add_argument('--test_mot16', default=False, help='test mot16')
+    parser.add_argument('--test_mot16', default=True, help='test mot16')
     parser.add_argument('--val_mot15', default=False, help='val mot15')
     parser.add_argument('--test_mot15', default=False, help='test mot15')
     parser.add_argument('--val_mot16', default=False, help='val mot16 or mot15')
@@ -188,22 +188,22 @@ if __name__ == '__main__':
     parser.add_argument('--min_box_area', type=float, default=100, help='filter out tiny boxes')
     parser.add_argument('--mean', type=float, default=[0.408, 0.447, 0.470], help='mean for STrack')
     parser.add_argument('--std', type=float, default=[0.289, 0.274, 0.278], help='std for STrack')
-    parser.add_argument('--input_video', type=str, default='../videos/MOT16-03.mp4',
+    parser.add_argument('--input_video', type=str, default='data/videos/MOT16-03.mp4',
                              help='path to the input video')
     parser.add_argument('--output_format', type=str, default='video', help='video or text')
-    parser.add_argument('--output_root', type=str, default='/results', help='expected output root path')
+    parser.add_argument('--output_root', type=str, default='data/results', help='expected output root path')
     parser.add_argument('--vis_state', type=int, default=0, help='1 for vision or heatmap and reid')
 
-    parser.add_argument('--weights',type=str, default='../weights/cstrack.pt', help='model.pt path(s)')
-    parser.add_argument('--cfg', type=str, default='../experiments/model_set/CSTrack.yaml', help='model.yaml path')
+    parser.add_argument('--weights',type=str, default='cfg/cstrack.pt', help='model.pt path(s)')
+    parser.add_argument('--cfg', type=str, default='cfg/model_set/CSTrack.yaml', help='model.yaml path')
     parser.add_argument('--conf_thres', type=float, default=0.5, help='object confidence threshold')
     parser.add_argument('--single_cls', action='store_true', help='treat as single-class dataset')
     parser.add_argument('--augment', action='store_true', help='augmented inference')
     parser.add_argument('--merge', action='store_true', help='use Merge NMS')
     parser.add_argument('--verbose', action='store_true', help='report mAP by class')
 
-    parser.add_argument('--data_cfg', type=str,default='../src/lib/cfg/data.json',help='load data from cfg')
-    parser.add_argument('--data_dir', type=str, default='../dataset')
+    parser.add_argument('--data_cfg', type=str,default='src/cfg/data.json',help='load data from cfg')
+    parser.add_argument('--data_dir', type=str, default='data')
     parser.add_argument('--device', default='0',help='-1 for CPU, use comma for multiple gpus')
 
     opt = parser.parse_args()
