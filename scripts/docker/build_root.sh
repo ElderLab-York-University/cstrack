@@ -18,6 +18,7 @@ echo 'user ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
 
 # Install Python dependencies.
 apt install -y \
+  libnvinfer-bin \
   python-is-python3 \
   python3-pip \
   python3-venv \

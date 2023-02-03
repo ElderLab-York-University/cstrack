@@ -169,10 +169,11 @@ class STrack(BaseTrack):
 class JDETracker(object):
     def __init__(self, opt, frame_rate=30):
         self.opt = opt
-        if int(opt.gpus[0]) >= 0:
+        if opt.gpus[0] >= 0:
             opt.device = torch.device('cuda')
         else:
             opt.device = torch.device('cpu')
+
         print('Creating model...')
 
         ckpt = torch.load(opt.weights, map_location=opt.device)  # load checkpoint
@@ -184,7 +185,12 @@ class JDETracker(object):
             state_dict = ckpt['model'].float().state_dict()  # to FP32
         state_dict = intersect_dicts(state_dict, self.model.state_dict(), exclude=exclude)  # intersect
         self.model.load_state_dict(state_dict, strict=False)  # load
-        self.model.cuda().eval()
+
+        if opt.gpus[0] >= 0:
+            self.model.cuda().eval()
+        else:
+            self.model.eval()
+
         total_params = sum(p.numel() for p in self.model.parameters())
         print(f'{total_params:,} total parameters.')
 

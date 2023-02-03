@@ -82,7 +82,13 @@ def eval_seq(opt, dataloader, data_type, result_filename,seq,save_dir=None, show
 
         # run tracking
         timer.tic()
-        blob = torch.from_numpy(img).cuda().unsqueeze(0)
+
+        blob = torch.from_numpy(img)
+        if opt.gpus[0] >= 0:
+            blob = blob.cuda()
+
+        blob = blob.unsqueeze(0)
+
         online_targets = tracker.update(blob, img0, seq,save_dir)
         online_tlwhs = []
         online_ids = []
@@ -204,12 +210,12 @@ if __name__ == '__main__':
 
     parser.add_argument('--data_cfg', type=str,default='src/cfg/data.json',help='load data from cfg')
     parser.add_argument('--data_dir', type=str, default='data')
-    parser.add_argument('--device', default='0',help='-1 for CPU, use comma for multiple gpus')
+    parser.add_argument('--device', type=int, default='0',help='-1 for CPU, use comma for multiple gpus')
 
     opt = parser.parse_args()
     opt.img_size = (1088, 608)
-    opt.gpus = opt.device
-    os.environ['CUDA_VISIBLE_DEVICES'] = opt.device
+    opt.gpus = [opt.device]
+    os.environ['CUDA_VISIBLE_DEVICES'] = str(opt.device)
     if not opt.val_mot16:
         seqs_str = '''KITTI-13
                       KITTI-17

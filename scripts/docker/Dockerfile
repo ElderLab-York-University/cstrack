@@ -2,7 +2,7 @@
 #
 # Author: Helio Perroni Filho
 
-FROM ubuntu:20.04
+FROM nvidia/cuda:11.6.0-cudnn8-devel-ubuntu20.04
 
 USER root
 WORKDIR /
