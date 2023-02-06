@@ -18,5 +18,5 @@ python -m pip install --upgrade pip
 # Install Python dependencies.
 # The installation is performed in two steps as a workaround to the
 # cython-bbox installation failure issue.
-python -m pip install -r requirements_1.txt
-python -m pip install -r requirements_2.txt
+python -m pip install -r requirements_1.txt --extra-index-url https://download.pytorch.org/whl/cu116
+python -m pip install -r requirements_2.txt --extra-index-url https://download.pytorch.org/whl/cu116
