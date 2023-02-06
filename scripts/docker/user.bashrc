@@ -56,7 +56,7 @@ if ! shopt -oq posix; then
 fi
 
 # Extend the executable search path.
-export PATH="$PATH:$HOME/.local/bin"
+export PATH="$HOME/.local/bin:$PATH"
 
 # Activate the CSTrack virtual environment.
 source cstrack/bin/activate
