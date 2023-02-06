@@ -213,7 +213,7 @@ if __name__ == '__main__':
     parser.add_argument('--device', type=int, default='0',help='-1 for CPU, use comma for multiple gpus')
 
     opt = parser.parse_args()
-    opt.img_size = (1088, 608)
+    opt.img_size = (960, 960)
     opt.gpus = [opt.device]
     os.environ['CUDA_VISIBLE_DEVICES'] = str(opt.device)
     if not opt.val_mot16:
