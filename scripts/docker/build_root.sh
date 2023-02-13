@@ -20,6 +20,9 @@ echo 'user ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
 apt install -y \
   libnvinfer-bin \
   python-is-python3 \
+  python3-libnvinfer-dev \
   python3-pip \
+  python3-pycuda \
   python3-venv \
-  python3-pyqt5
+  python3-pyqt5 \
+  tensorrt-dev

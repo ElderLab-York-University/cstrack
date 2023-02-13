@@ -1,5 +1,6 @@
 # This file contains modules common to various models
 import math
+from typing import List
 
 import torch
 import torch.nn as nn
@@ -94,7 +95,7 @@ class Concat(nn.Module):
         super(Concat, self).__init__()
         self.d = dimension
 
-    def forward(self, x):
+    def forward(self, x: List[torch.Tensor]):
         return torch.cat(x, self.d)
 
 

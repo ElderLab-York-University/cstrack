@@ -1,21 +1,57 @@
 from collections import deque
-import os
+
 import cv2
 import numpy as np
-import torch
-import torch.nn.functional as F
-from torchsummary import summary
 
-from core.mot.general import non_max_suppression_and_inds, non_max_suppression_jde, non_max_suppression, scale_coords
-from core.mot.torch_utils import intersect_dicts
-from models.mot.cstrack import Model
+import tracker.cstrack_trt
+from core.mot.general import non_max_suppression_and_inds, scale_coords
 
 from mot_online import matching
-from mot_online.kalman_filter import KalmanFilter
-from mot_online.log import logger
-from mot_online.utils import *
-
 from mot_online.basetrack import BaseTrack, TrackState
+from mot_online.kalman_filter import KalmanFilter
+from mot_online.timer import Timer
+from mot_online.log import logger
+
+
+def joint_stracks(tlista, tlistb):
+    exists = {}
+    res = []
+    for t in tlista:
+        exists[t.track_id] = 1
+        res.append(t)
+    for t in tlistb:
+        tid = t.track_id
+        if not exists.get(tid, 0):
+            exists[tid] = 1
+            res.append(t)
+    return res
+
+
+def sub_stracks(tlista, tlistb):
+    stracks = {}
+    for t in tlista:
+        stracks[t.track_id] = t
+    for t in tlistb:
+        tid = t.track_id
+        if stracks.get(tid, 0):
+            del stracks[tid]
+    return list(stracks.values())
+
+
+def remove_duplicate_stracks(stracksa, stracksb):
+    pdist = matching.iou_distance(stracksa, stracksb)
+    pairs = np.where(pdist < 0.15)
+    dupa, dupb = list(), list()
+    for p, q in zip(*pairs):
+        timep = stracksa[p].frame_id - stracksa[p].start_frame
+        timeq = stracksb[q].frame_id - stracksb[q].start_frame
+        if timep > timeq:
+            dupb.append(q)
+        else:
+            dupa.append(p)
+    resa = [t for i, t in enumerate(stracksa) if not i in dupa]
+    resb = [t for i, t in enumerate(stracksb) if not i in dupb]
+    return resa, resb
 
 
 class STrack(BaseTrack):
@@ -166,58 +202,6 @@ class STrack(BaseTrack):
         return 'OT_{}_({}-{})'.format(self.track_id, self.start_frame, self.end_frame)
 
 
-class CSTrack:
-    r'''PyTorch-based CSTrack inference.
-    '''
-    def __init__(self, opt):
-        r'''Create a new CSTrack inference network from given options.
-        '''
-        if opt.gpus[0] >= 0:
-            opt.device = torch.device('cuda')
-        else:
-            opt.device = torch.device('cpu')
-
-        ckpt = torch.load(opt.weights, map_location=opt.device)  # load checkpoint
-        model = Model(opt.cfg or ckpt['model'].yaml, ch=3, nc=1).to(opt.device)  # create
-
-        if type(ckpt['model']).__name__ == "OrderedDict":
-            state_dict = ckpt['model']
-        else:
-            state_dict = ckpt['model'].float().state_dict()  # to FP32
-
-        exclude = ['anchor'] if opt.cfg else []  # exclude keys
-        state_dict = intersect_dicts(state_dict, model.state_dict(), exclude=exclude)  # intersect
-        model.load_state_dict(state_dict, strict=False)  # load
-
-        if opt.gpus[0] >= 0:
-            model.cuda().eval()
-        else:
-            model.eval()
-
-        self.opt = opt
-        self.model = model
-
-        total_params = sum(p.numel() for p in self.model.parameters())
-        print(f'{total_params:,} total parameters.')
-
-    def __call__(self, image_fitted, image_original):
-        r'''Perform inference on the CSTrack model.
-        '''
-        blob = torch.from_numpy(image_fitted)
-        if self.opt.gpus[0] >= 0:
-            blob = blob.cuda()
-
-        blob = blob.unsqueeze(0)
-
-        with torch.no_grad():
-            return self.model(blob, augment=False)
-
-    def __getattr__(self, name):
-        r'''Relay any attribute access request to the model object.
-        '''
-        return getattr(self.model, name)
-
-
 class JDETracker(object):
     def __init__(self, opt, frame_rate=30):
         self.opt = opt
@@ -236,7 +220,11 @@ class JDETracker(object):
 
         self.kalman_filter = KalmanFilter()
 
+        self.timer = Timer()
+
     def update(self, image_fitted, image_original, seq_num, save_dir):
+        import torch
+
         self.frame_id += 1
         activated_starcks = []
         refind_stracks = []
@@ -245,9 +233,16 @@ class JDETracker(object):
         dets = []
 
         ''' Step 1: Network forward, get detections & embeddings'''
-        with torch.no_grad():
-            output = self.model(image_fitted, image_original)
-            pred, train_out = output[1]
+        self.timer.tic()
+        (pred, features) = self.model(image_fitted, image_original)
+        self.timer.toc()
+
+        if self.frame_id % 20 == 0:
+            fps = 1. / max(1e-5, self.timer.average_time)
+            logger.info(f'Person detection / feature extraction at {fps:.2f} FPS)')
+
+        pred = torch.from_numpy(pred)
+        features = torch.from_numpy(features)
 
         pred = pred[pred[:, :, 4] > self.opt.conf_thres]
         detections = []
@@ -255,7 +250,7 @@ class JDETracker(object):
             dets,x_inds,y_inds = non_max_suppression_and_inds(pred[:,:6].unsqueeze(0), self.opt.conf_thres, self.opt.nms_thres,method='cluster_diou')
             if len(dets) != 0:
                 scale_coords(self.opt.img_size, dets[:, :4], image_original.shape).round()
-                id_feature = output[0][0, y_inds, x_inds, :].cpu().numpy()
+                id_feature = features[0, y_inds, x_inds, :].cpu().numpy()
 
                 detections = [STrack(STrack.tlbr_to_tlwh(tlbrs[:4]), tlbrs[4], f, 30) for
                               (tlbrs, f) in zip(dets[:, :5], id_feature)]
@@ -292,17 +287,6 @@ class JDETracker(object):
             else:
                 track.re_activate(det, self.frame_id, new_id=False)
                 refind_stracks.append(track)
-
-        # vis
-        track_features, det_features, cost_matrix, cost_matrix_det, cost_matrix_track = [],[],[],[],[]
-        if self.opt.vis_state == 1 and self.frame_id % 20 == 0:
-            if len(dets) != 0:
-                for i in range(0, dets.shape[0]):
-                    bbox = dets[i][0:4]
-                    cv2.rectangle(image_original, (int(bbox[0]), int(bbox[1])),(int(bbox[2]), int(bbox[3])),(0, 255, 0), 2)
-                track_features, det_features, cost_matrix, cost_matrix_det, cost_matrix_track = matching.vis_id_feature_A_distance(strack_pool, detections)
-            vis_feature(self.frame_id,seq_num,image_original,track_features,
-                                  det_features, cost_matrix, cost_matrix_det, cost_matrix_track, max_num=5, out_path=save_dir)
 
         ''' Step 3: Second association, with IOU'''
         detections = [detections[i] for i in u_detection]
@@ -351,8 +335,6 @@ class JDETracker(object):
                 track.mark_removed()
                 removed_stracks.append(track)
 
-        # print('Ramained match {} s'.format(t4-t3))
-
         self.tracked_stracks = [t for t in self.tracked_stracks if t.state == TrackState.Tracked]
         self.tracked_stracks = joint_stracks(self.tracked_stracks, activated_starcks)
         self.tracked_stracks = joint_stracks(self.tracked_stracks, refind_stracks)
@@ -360,7 +342,8 @@ class JDETracker(object):
         self.lost_stracks.extend(lost_stracks)
         self.lost_stracks = sub_stracks(self.lost_stracks, self.removed_stracks)
         self.removed_stracks.extend(removed_stracks)
-        self.tracked_stracks, self.lost_stracks = remove_duplicate_stracks(self.tracked_stracks, self.lost_stracks)
+        (self.tracked_stracks, self.lost_stracks) = remove_duplicate_stracks(self.tracked_stracks, self.lost_stracks)
+
         # get scores of lost tracks
         output_stracks = [track for track in self.tracked_stracks if track.is_activated]
 
@@ -371,171 +354,3 @@ class JDETracker(object):
         logger.debug('Removed: {}'.format([track.track_id for track in removed_stracks]))
 
         return output_stracks
-
-
-def joint_stracks(tlista, tlistb):
-    exists = {}
-    res = []
-    for t in tlista:
-        exists[t.track_id] = 1
-        res.append(t)
-    for t in tlistb:
-        tid = t.track_id
-        if not exists.get(tid, 0):
-            exists[tid] = 1
-            res.append(t)
-    return res
-
-
-def sub_stracks(tlista, tlistb):
-    stracks = {}
-    for t in tlista:
-        stracks[t.track_id] = t
-    for t in tlistb:
-        tid = t.track_id
-        if stracks.get(tid, 0):
-            del stracks[tid]
-    return list(stracks.values())
-
-
-def remove_duplicate_stracks(stracksa, stracksb):
-    pdist = matching.iou_distance(stracksa, stracksb)
-    pairs = np.where(pdist < 0.15)
-    dupa, dupb = list(), list()
-    for p, q in zip(*pairs):
-        timep = stracksa[p].frame_id - stracksa[p].start_frame
-        timeq = stracksb[q].frame_id - stracksb[q].start_frame
-        if timep > timeq:
-            dupb.append(q)
-        else:
-            dupa.append(p)
-    resa = [t for i, t in enumerate(stracksa) if not i in dupa]
-    resb = [t for i, t in enumerate(stracksb) if not i in dupb]
-    return resa, resb
-
-def vis_feature(frame_id,seq_num,img,track_features, det_features, cost_matrix, cost_matrix_det, cost_matrix_track,max_num=5, out_path='/home/XX/'):
-    num_zero = ["0000","000","00","0"]
-    img = cv2.resize(img, (778, 435))
-
-    if len(det_features) != 0:
-        max_f = det_features.max()
-        min_f = det_features.min()
-        det_features = np.round((det_features - min_f) / (max_f - min_f) * 255)
-        det_features = det_features.astype(np.uint8)
-        d_F_M = []
-        cutpff_line = [40]*512
-        for d_f in det_features:
-            for row in range(45):
-                d_F_M += [[40]*3+d_f.tolist()+[40]*3]
-            for row in range(3):
-                d_F_M += [[40]*3+cutpff_line+[40]*3]
-        d_F_M = np.array(d_F_M)
-        d_F_M = d_F_M.astype(np.uint8)
-        det_features_img = cv2.applyColorMap(d_F_M, cv2.COLORMAP_JET)
-        feature_img2 = cv2.resize(det_features_img, (435, 435))
-        #cv2.putText(feature_img2, "det_features", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-    else:
-        feature_img2 = np.zeros((435, 435))
-        feature_img2 = feature_img2.astype(np.uint8)
-        feature_img2 = cv2.applyColorMap(feature_img2, cv2.COLORMAP_JET)
-        #cv2.putText(feature_img2, "det_features", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-    feature_img = np.concatenate((img, feature_img2), axis=1)
-
-    if len(cost_matrix_det) != 0 and len(cost_matrix_det[0]) != 0:
-        max_f = cost_matrix_det.max()
-        min_f = cost_matrix_det.min()
-        cost_matrix_det = np.round((cost_matrix_det - min_f) / (max_f - min_f) * 255)
-        d_F_M = []
-        cutpff_line = [40]*len(cost_matrix_det)*10
-        for c_m in cost_matrix_det:
-            add = []
-            for row in range(len(c_m)):
-                add += [255-c_m[row]]*10
-            for row in range(10):
-                d_F_M += [[40]+add+[40]]
-        d_F_M = np.array(d_F_M)
-        d_F_M = d_F_M.astype(np.uint8)
-        cost_matrix_det_img = cv2.applyColorMap(d_F_M, cv2.COLORMAP_JET)
-        feature_img2 = cv2.resize(cost_matrix_det_img, (435, 435))
-        #cv2.putText(feature_img2, "cost_matrix_det", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-    else:
-        feature_img2 = np.zeros((435, 435))
-        feature_img2 = feature_img2.astype(np.uint8)
-        feature_img2 = cv2.applyColorMap(feature_img2, cv2.COLORMAP_JET)
-        #cv2.putText(feature_img2, "cost_matrix_det", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-    feature_img = np.concatenate((feature_img, feature_img2), axis=1)
-
-    if len(track_features) != 0:
-        max_f = track_features.max()
-        min_f = track_features.min()
-        track_features = np.round((track_features - min_f) / (max_f - min_f) * 255)
-        track_features = track_features.astype(np.uint8)
-        d_F_M = []
-        cutpff_line = [40]*512
-        for d_f in track_features:
-            for row in range(45):
-                d_F_M += [[40]*3+d_f.tolist()+[40]*3]
-            for row in range(3):
-                d_F_M += [[40]*3+cutpff_line+[40]*3]
-        d_F_M = np.array(d_F_M)
-        d_F_M = d_F_M.astype(np.uint8)
-        track_features_img = cv2.applyColorMap(d_F_M, cv2.COLORMAP_JET)
-        feature_img2 = cv2.resize(track_features_img, (435, 435))
-        #cv2.putText(feature_img2, "track_features", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-    else:
-        feature_img2 = np.zeros((435, 435))
-        feature_img2 = feature_img2.astype(np.uint8)
-        feature_img2 = cv2.applyColorMap(feature_img2, cv2.COLORMAP_JET)
-        #cv2.putText(feature_img2, "track_features", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-    feature_img = np.concatenate((feature_img, feature_img2), axis=1)
-
-    if len(cost_matrix_track) != 0 and len(cost_matrix_track[0]) != 0:
-        max_f = cost_matrix_track.max()
-        min_f = cost_matrix_track.min()
-        cost_matrix_track = np.round((cost_matrix_track - min_f) / (max_f - min_f) * 255)
-        d_F_M = []
-        cutpff_line = [40]*len(cost_matrix_track)*10
-        for c_m in cost_matrix_track:
-            add = []
-            for row in range(len(c_m)):
-                add += [255-c_m[row]]*10
-            for row in range(10):
-                d_F_M += [[40]+add+[40]]
-        d_F_M = np.array(d_F_M)
-        d_F_M = d_F_M.astype(np.uint8)
-        cost_matrix_track_img = cv2.applyColorMap(d_F_M, cv2.COLORMAP_JET)
-        feature_img2 = cv2.resize(cost_matrix_track_img, (435, 435))
-        #cv2.putText(feature_img2, "cost_matrix_track", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-    else:
-        feature_img2 = np.zeros((435, 435))
-        feature_img2 = feature_img2.astype(np.uint8)
-        feature_img2 = cv2.applyColorMap(feature_img2, cv2.COLORMAP_JET)
-        #cv2.putText(feature_img2, "cost_matrix_track", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-    feature_img = np.concatenate((feature_img, feature_img2), axis=1)
-
-    if len(cost_matrix) != 0 and len(cost_matrix[0]) != 0:
-        max_f = cost_matrix.max()
-        min_f = cost_matrix.min()
-        cost_matrix = np.round((cost_matrix - min_f) / (max_f - min_f) * 255)
-        d_F_M = []
-        cutpff_line = [40]*len(cost_matrix[0])*10
-        for c_m in cost_matrix:
-            add = []
-            for row in range(len(c_m)):
-                add += [255-c_m[row]]*10
-            for row in range(10):
-                d_F_M += [[40]+add+[40]]
-        d_F_M = np.array(d_F_M)
-        d_F_M = d_F_M.astype(np.uint8)
-        cost_matrix_img = cv2.applyColorMap(d_F_M, cv2.COLORMAP_JET)
-        feature_img2 = cv2.resize(cost_matrix_img, (435, 435))
-        #cv2.putText(feature_img2, "cost_matrix", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-    else:
-        feature_img2 = np.zeros((435, 435))
-        feature_img2 = feature_img2.astype(np.uint8)
-        feature_img2 = cv2.applyColorMap(feature_img2, cv2.COLORMAP_JET)
-        #cv2.putText(feature_img2, "cost_matrix", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-    feature_img = np.concatenate((feature_img, feature_img2), axis=1)
-
-    dst_path = out_path + "/" + seq_num + "_" + num_zero[len(str(frame_id))-1] + str(frame_id) + '.png'
-    cv2.imwrite(dst_path, feature_img)

@@ -3,6 +3,7 @@ import math
 import logging
 from copy import deepcopy
 from pathlib import Path
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
@@ -12,10 +13,43 @@ from torch.nn.parameter import Parameter
 from models.mot.common import Conv, Bottleneck, SPP, DWConv, Focus, BottleneckCSP, Concat, ASPP,_NonLocalBlockND
 from models.mot.experimental import MixConv2d, CrossConv, C3
 from core.mot.general import check_anchor_order, make_divisible, check_file, set_logging
-from core.mot.torch_utils import (
-    time_synchronized, fuse_conv_and_bn, model_info, scale_img, initialize_weights, select_device)
+from core.mot.torch_utils import time_synchronized, fuse_conv_and_bn, model_info, scale_img, initialize_weights, select_device
+
 
 logger = logging.getLogger(__name__)
+
+
+@torch.jit.script
+def normalizeDetection(y: torch.Tensor, scale: Parameter, offset: torch.Tensor, stride: torch.Tensor):
+    r'''Normalize detection outputs.
+
+        **Implementation note**
+
+        This is kept as a separate function so that it can be pre-compiled using the
+        PyTorch JIT. This in turn is necessary to avoid the ONNX warning about tensors
+        and Python values being compared to each other.
+    '''
+    if scale[0] == 10:
+        y[..., 0:2] = (y[..., 0:2] * 2. - 0.5 + offset) * stride # xy
+    else:
+        y[..., 0:2] = ((y[..., 0:2] - 0.5) * scale + offset) * stride  # xy
+
+    return y
+
+
+@torch.jit.script
+def makeGrid(nx: int=20, ny: int=20):
+    (yv, xv) = torch.meshgrid([torch.arange(ny), torch.arange(nx)], indexing='ij')
+    return torch.stack((xv, yv), 2).view((1, 1, ny, nx, 2)).float()
+
+
+@torch.jit.script
+def resizeGrid(grid: torch.Tensor, nx: int, ny: int):
+    if grid.shape[2] != ny or grid.shape[3] != nx:
+        return makeGrid(nx, ny)
+
+    return grid
+
 
 class Detect(nn.Module):
     def __init__(self, nc=80, anchors=(), id_embedding=256, ch=()):  # detection layer
@@ -26,7 +60,7 @@ class Detect(nn.Module):
         self.nl = len(anchors)  # number of detection layers
         self.na = len(anchors[0]) // 2  # number of anchors
         self.id_embedding = id_embedding
-        self.grid = [torch.zeros(1)] * self.nl  # init grid
+        self.grid = [makeGrid()] * self.nl  # init grid
         a = torch.tensor(anchors).float().view(self.nl, -1, 2)
         self.register_buffer('anchors', a)  # shape(nl,na,2)
         self.register_buffer('anchor_grid', a.clone().view(self.nl, 1, -1, 1, 1, 2))  # shape(nl,1,na,1,1,2)
@@ -40,22 +74,14 @@ class Detect(nn.Module):
         # x = x.copy()  # for profiling
         z = []  # inference output
         self.training |= self.export
-        for i in range(self.nl):
-            x[i] = self.m[i](x[i][0])  # conv
-            #x[i] = self.m[i](x[i])  # conv
+        for (i, m_i) in enumerate(self.m):
+            x[i] = m_i(x[i][0])  # conv
             bs, _, ny, nx = x[i].shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
             x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
             if not self.training:  # inference
-                if self.grid[i].shape[2:4] != x[i].shape[2:4]:
-                    self.grid[i] = self._make_grid(nx, ny).to(x[i].device)
+                self.grid[i] = resizeGrid(self.grid[i], nx, ny).to(x[i].device)
 
-                y = x[i].sigmoid()
-
-                # Uncomment this line if self.k[0] == 10
-                y[..., 0:2] = (y[..., 0:2] * 2. - 0.5 + self.grid[i].to(x[i].device)) * self.stride[i] # xy
-
-                # Uncomment this line if self.k[0] != 10
-                # y[..., 0:2] = ((y[..., 0:2] - 0.5) * self.k + self.grid[i].to(x[i].device)) * self.stride[i]  # xy
+                y = normalizeDetection(x[i].sigmoid(), self.k, self.grid[i].to(x[i].device), self.stride[i])
 
                 y[..., 2:4] = (y[..., 2:4] * 2) ** 2 * self.anchor_grid[i]  # wh
 
@@ -64,12 +90,7 @@ class Detect(nn.Module):
                 z.append(y.view(bs, -1, self.no))
 
         #return [x[0][...,6:],x] if self.training else [x[0][...,6:],(torch.cat(z, 1), x)]
-        return [x,self.k] if self.training else (torch.cat(z, 1), [x,self.k])
-
-    @staticmethod
-    def _make_grid(nx=20, ny=20):
-        yv, xv = torch.meshgrid([torch.arange(ny), torch.arange(nx)])
-        return torch.stack((xv, yv), 2).view((1, 1, ny, nx, 2)).float()
+        return [x, self.k] if self.training else [torch.cat(z, 1), self.k]
 
 
 class DenseMask(nn.Module):
@@ -140,9 +161,9 @@ class SAAN_Attention(nn.Module):
 
         if c_state:
             self.c_attention = nn.Sequential(nn.Conv1d(1, 1, kernel_size=k_size, padding=(k_size - 1) // 2, bias=False),
-                                                  nn.LayerNorm([1, ch]),
-                                                  nn.LeakyReLU(0.3, inplace=True),
-                                                  nn.Linear(ch, ch, bias=False))
+                                                nn.LayerNorm([1, ch]),
+                                                nn.LeakyReLU(0.3, inplace=True),
+                                                nn.Linear(ch, ch, bias=False))
 
         if s_state:
             self.conv_s = nn.Sequential(Conv(ch, ch // 4, k=1))
@@ -152,6 +173,9 @@ class SAAN_Attention(nn.Module):
     def forward(self, x):
         # x: input features with shape [b, c, h, w]
         b, c, h, w = x.size()
+
+        y_c = torch.zeros(1)
+        y_s = torch.zeros(1)
 
         # channel_attention
         if self.c_state:
@@ -242,8 +266,7 @@ class CCN(nn.Module):
         #print("M_t1",torch.sort(M_t1[0][0]))
         #print("y_t1",torch.max(y_t1),torch.min(y_t1))
         #print("y_t2", torch.max(y_t2), torch.min(y_t2))
-        return [x_t1+x,x_t2+x]
-
+        return torch.stack([x_t1 + x, x_t2 + x])
 
 
 class Model(nn.Module):
@@ -269,7 +292,7 @@ class Model(nn.Module):
         if isinstance(m, Detect):
             s = 128  # 2x min stride
             x = self.forward(torch.zeros(2, ch, s, s))
-            m.stride = torch.tensor([s / x.shape[-2] for x in x[-1][0]])  # forward
+            m.stride = torch.tensor([s / x.shape[-2] for x in x[0]])  # forward
             m.anchors /= m.stride.view(-1, 1, 1)
             check_anchor_order(m)
             self.stride = m.stride
@@ -281,53 +304,23 @@ class Model(nn.Module):
         self.info()
         print('')
 
-    def forward(self, x, augment=False, profile=False):
-        if augment:
-            img_size = x.shape[-2:]  # height, width
-            s = [1, 0.83, 0.67]  # scales
-            f = [None, 3, None]  # flips (2-ud, 3-lr)
-            y = []  # outputs
-            for si, fi in zip(s, f):
-                xi = scale_img(x.flip(fi) if fi else x, si)
-                yi = self.forward_once(xi)[0]  # forward
-                # cv2.imwrite('img%g.jpg' % s, 255 * xi[0].numpy().transpose((1, 2, 0))[:, :, ::-1])  # save
-                yi[..., :4] /= si  # de-scale
-                if fi == 2:
-                    yi[..., 1] = img_size[0] - yi[..., 1]  # de-flip ud
-                elif fi == 3:
-                    yi[..., 0] = img_size[1] - yi[..., 0]  # de-flip lr
-                y.append(yi)
-            return torch.cat(y, 1), None  # augmented inference, train
-        else:
-            return self.forward_once(x, profile)  # single-scale inference, train
-
-    def forward_once(self, x, profile=False):
-        y, dt = [], []  # outputs
+    def forward(self, x):
+        y = []  # outputs
         output = []
         for m in self.model:
-            if m.f != -1:  # if not from previous layer
-                x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
+            if m.f == -1:  # if not from previous layer
+                x = m(x)  # run
+            elif isinstance(m.f, int):
+                x = m(y[m.f])
+            else:
+                x = m([x if j == -1 else y[j] for j in m.f])  # from earlier layers
 
-            if profile:
-                try:
-                    import thop
-                    o = thop.profile(m, inputs=(x,), verbose=False)[0] / 1E9 * 2  # FLOPS
-                except:
-                    o = 0
-                t = time_synchronized()
-                for _ in range(10):
-                    _ = m(x)
-                dt.append((time_synchronized() - t) * 100)
-                print('%10.1f%10.0f%10.1fms %-40s' % (o, m.np, dt[-1], m.type))
-
-            x = m(x)  # run
             if m.i in self.out:
                 output.append(x)
+
             y.append(x if m.i in self.save else None)  # save output
 
-        if profile:
-            print('%.1fms total' % sum(dt))
-        return output
+        return (output[1][0], output[0])
 
     def _initialize_biases(self, cf=None):  # initialize biases into Detect(), cf is class frequency
         # cf = torch.bincount(torch.tensor(np.concatenate(dataset.labels, 0)[:, 0]).long(), minlength=nc) + 1.
